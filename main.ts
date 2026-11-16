@@ -76,6 +76,10 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_ATTEMPTS_PER_PROMPT = 3;
 /** The pause between attempts, in milliseconds (never inside a request). */
 const RETRY_PAUSE_MS = 500;
+/** One gateway call may take at most this long: a hung dial fails over
+ * instead of stalling the trial (its wall is 240s; a healthy model answers
+ * in seconds, so 45s is generous for a slow one and still bounds a dead one). */
+const DIAL_TIMEOUT_MS = 45000;
 /** How often the register is retried while the env is not up yet. */
 const REGISTER_TRIES = 20;
 
@@ -253,6 +257,7 @@ async function dial(model: string, body: Json): Promise<Response> {
     method: 'POST',
     headers,
     body: JSON.stringify(upstreamBody),
+    signal: AbortSignal.timeout(DIAL_TIMEOUT_MS),
   });
 }
 
@@ -281,7 +286,8 @@ async function serveWithFailover(body: Json, requires: Requirement): Promise<Dia
     try {
       upstream = await dial(model.id, body);
     } catch (err) {
-      failures.push({ status: 0, code: 'gateway_unreachable', model: model.id });
+      const timedOut = (err as Error).name === 'TimeoutError';
+      failures.push({ status: 0, code: timedOut ? 'timeout' : 'gateway_unreachable', model: model.id });
       log(`dial ${model.id} failed: ${(err as Error).message}`);
       coolingDown.add(model.id);
       if (i + 1 < attempts) await sleep(RETRY_PAUSE_MS);
